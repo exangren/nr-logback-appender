@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -27,16 +28,18 @@ public class NewRelicAppender extends AppenderBase<ILoggingEvent> {
     private static final String CONTENT_ENCODING_HEADER = "Content-Encoding";
     private static final String CONTENT_ENCODING = "gzip";
     private static final String API_KEY_HEADER = "Api-Key";
-    private static final String TRUNCATED_SIGN = "...<truncated>";
+    private static final int MIN_UNCOMPRESSED_SIZE = 256;
     private static final int MAX_UNCOMPRESSED_SIZE = 1024;
     private static final int MAX_PAYLOAD_SIZE = MAX_UNCOMPRESSED_SIZE * 1000;
     private static final Duration DEFAULT_RETRY_INTERVAL = Duration.ofSeconds(2);
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(2);
     private static final int DEFAULT_RETRY_NUMBER = 3;
+    private static final ExecutorService EXECUTOR_SERVICE = Executors.newSingleThreadExecutor();
     private static final HttpClient httpClient = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
-            .executor(Executors.newSingleThreadExecutor())
-            .connectTimeout(DEFAULT_TIMEOUT).build();
+            .executor(EXECUTOR_SERVICE)
+            .connectTimeout(DEFAULT_TIMEOUT)
+            .build();
 
     private Layout<ILoggingEvent> layout;
     private String host;
@@ -45,6 +48,7 @@ public class NewRelicAppender extends AppenderBase<ILoggingEvent> {
     private long retryInterval = -1;
     private int retryNumber = -1;
     private int maxPayloadSize = -1;
+    private int maxUncompressedSize = -1;
 
     @Override
     public void start() {
@@ -58,10 +62,16 @@ public class NewRelicAppender extends AppenderBase<ILoggingEvent> {
     protected void append(ILoggingEvent loggingEvent) {
         var event = layout.doLayout(loggingEvent);
 
-        var rawPayload = truncateIfNeeded(event);
+        if (event.length() > getMaxPayloadSize()) {
+            addError("Total log message size should be less than [" + getMaxPayloadSize() + "] bytes.",
+                    new IllegalArgumentException("Payload exceeds [" + getMaxPayloadSize() + "] bytes."));
+            addError("Message: " + event);
+            return;
+        }
+
         PayloadContainer payload;
         try {
-            payload = compressIfNeeded(rawPayload);
+            payload = compressIfNeeded(event);
         } catch (IOException e) {
             addError("Could not compress message.", e);
             return;
@@ -73,7 +83,8 @@ public class NewRelicAppender extends AppenderBase<ILoggingEvent> {
         var httpRequest = createHttpRequest(payload);
         var responseHandler = HttpResponse.BodyHandlers.ofString();
         var response = httpClient.sendAsync(httpRequest, responseHandler)
-                .thenComposeAsync(resp -> tryResend(httpRequest, responseHandler, 1, resp));
+                .thenComposeAsync(resp -> tryResend(httpRequest, responseHandler, 1, resp),
+                        EXECUTOR_SERVICE);
 
         var result = handleResponse(response);
         try {
@@ -108,7 +119,8 @@ public class NewRelicAppender extends AppenderBase<ILoggingEvent> {
                 addError("While retrying a sleep is interrupted", e);
             }
             return httpClient.sendAsync(httpRequest, handler)
-                    .thenComposeAsync(response -> tryResend(httpRequest, handler, count + 1, response));
+                    .thenComposeAsync(response -> tryResend(httpRequest, handler, count + 1, response),
+                            EXECUTOR_SERVICE);
         }
     }
 
@@ -125,15 +137,9 @@ public class NewRelicAppender extends AppenderBase<ILoggingEvent> {
         return httpBuilder.build();
     }
 
-    private String truncateIfNeeded(String event) {
-        return event.length() > MAX_PAYLOAD_SIZE
-                ? event.substring(0, MAX_PAYLOAD_SIZE - TRUNCATED_SIGN.length() - 1) + TRUNCATED_SIGN
-                : event;
-    }
-
-    private PayloadContainer compressIfNeeded(String rawPayload) throws IOException {
+    PayloadContainer compressIfNeeded(String rawPayload) throws IOException {
         var payloadBytes = rawPayload.getBytes(StandardCharsets.UTF_8);
-        var toBeCompressed = rawPayload.length() > MAX_UNCOMPRESSED_SIZE;
+        var toBeCompressed = rawPayload.length() > getMaxUncompressedSize();
         var payload = toBeCompressed ? compress(payloadBytes) : payloadBytes;
         return new PayloadContainer(payload, toBeCompressed);
     }
@@ -199,7 +205,15 @@ public class NewRelicAppender extends AppenderBase<ILoggingEvent> {
     }
 
     public void setMaxPayloadSize(int maxPayloadSize) {
-        this.maxPayloadSize = maxPayloadSize;
+        this.maxPayloadSize = Math.min(maxPayloadSize, MAX_PAYLOAD_SIZE);
+    }
+
+    public int getMaxUncompressedSize() {
+        return maxUncompressedSize > 0 ? maxUncompressedSize : MAX_UNCOMPRESSED_SIZE;
+    }
+
+    public void setMaxUncompressedSize(int maxUncompressedSize) {
+        this.maxUncompressedSize = Math.max(maxUncompressedSize, MIN_UNCOMPRESSED_SIZE);
     }
 
     private boolean validateSettings() {
@@ -222,7 +236,7 @@ public class NewRelicAppender extends AppenderBase<ILoggingEvent> {
         return String.format("'%s' attribute is not set for the appender named [%s]!", attribute, name);
     }
 
-    private record PayloadContainer(byte[] payload, boolean compressed) {
+    record PayloadContainer(byte[] payload, boolean compressed) {
 
     }
 }
