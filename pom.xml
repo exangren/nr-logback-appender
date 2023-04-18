@@ -17,6 +17,9 @@
     <logback.version>1.4.6</logback.version>
     <logstash.logback.version>7.3</logstash.logback.version>
     <jackson.uuid.version>4.1.0</jackson.uuid.version>
+    <!-- Maven plugins -->
+    <compile.plugin.version>3.11.0</compile.plugin.version>
+    <surefire.plugin.version>3.0.0</surefire.plugin.version>
   </properties>
 
   <dependencies>
@@ -65,12 +68,17 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-        <version>3.11.0</version>
+        <version>${compile.plugin.version}</version>
         <configuration>
           <source>${java.version}</source>
           <target>${java.version}</target>
           <encoding>${project.build.sourceEncoding}</encoding>
         </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${surefire.plugin.version}</version>
       </plugin>
     </plugins>
   </build>
